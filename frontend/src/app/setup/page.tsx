@@ -5,6 +5,8 @@ import { motion } from "framer-motion";
 import { Upload, FileText, ChevronRight, Settings, Briefcase, Code, Terminal, CheckCircle2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { API_BASE_URL } from "../config";
+import Link from "next/link";
+import Image from "next/image";
 
 export default function SetupPage() {
   const router = useRouter();
@@ -12,6 +14,8 @@ export default function SetupPage() {
   
   const [candidateUser, setCandidateUser] = useState<any>(null);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+  const [savedResume, setSavedResume] = useState<any>(null);
+  const [useSavedResume, setUseSavedResume] = useState(true);
 
   useEffect(() => {
     const session = localStorage.getItem("hiremind_user");
@@ -19,8 +23,22 @@ export default function SetupPage() {
       router.push("/login?redirect=/setup");
       return;
     }
-    setCandidateUser(JSON.parse(session));
+    const parsedUser = JSON.parse(session);
+    setCandidateUser(parsedUser);
     setIsCheckingAuth(false);
+
+    // Fetch existing resume
+    fetch(`${API_BASE_URL}/api/resume/${parsedUser.id}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.status === "success" && data.data) {
+          setSavedResume(data.data);
+          setUseSavedResume(true);
+        } else {
+          setUseSavedResume(false);
+        }
+      })
+      .catch(e => console.error("Failed to fetch resume", e));
   }, [router]);
   
   const [file, setFile] = useState<File | null>(null);
@@ -30,6 +48,7 @@ export default function SetupPage() {
   
   const [selectedMode, setSelectedMode] = useState("General");
   const [selectedPersona, setSelectedPersona] = useState("Friendly");
+  const [questionLimit, setQuestionLimit] = useState<number>(10);
   
   const modes = [
     { id: "General", icon: <Briefcase className="w-5 h-5" />, desc: "Standard behavioral and background questions." },
@@ -38,6 +57,12 @@ export default function SetupPage() {
   ];
   
   const personas = ["Friendly", "Strict", "Fast-paced"];
+  
+  const lengths = [
+    { id: 5, label: "Quick Screen" },
+    { id: 10, label: "Standard" },
+    { id: 15, label: "Deep Dive" }
+  ];
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -69,14 +94,38 @@ export default function SetupPage() {
   };
 
   const handleSubmit = async () => {
-    if (!file) return;
+    if (!useSavedResume && !file) return;
     
     setIsUploading(true);
     
+    // If using saved resume, we bypass the PDF upload endpoint and directly set context
+    if (useSavedResume && savedResume) {
+      const interviewContext = {
+        resume_text: savedResume.raw_text,
+        mode: selectedMode,
+        persona: selectedPersona,
+        question_limit: questionLimit,
+        raw_resume_text: savedResume.raw_text
+      };
+      localStorage.setItem("hiremind_context", JSON.stringify(interviewContext));
+      setUploadSuccess(true);
+      setTimeout(() => {
+        router.push("/interview");
+      }, 1000);
+      return;
+    }
+    
+    if (!file && !useSavedResume) return;
+    
     const formData = new FormData();
-    formData.append("file", file);
+    if (file) {
+      formData.append("file", file);
+    }
     formData.append("mode", selectedMode);
     formData.append("persona", selectedPersona);
+    if (candidateUser?.id) {
+      formData.append("user_id", candidateUser.id.toString());
+    }
     
     try {
       const response = await fetch(`${API_BASE_URL}/api/setup/upload`, {
@@ -91,15 +140,23 @@ export default function SetupPage() {
       const data = await response.json();
       console.log("Upload Success:", data);
       
-      // Store the parsed context in localStorage or a global state manager for the interview page
       localStorage.setItem("hiremind_context", JSON.stringify({
         ...data.data.extracted_context,
+        raw_resume_text: data.data.raw_resume_text,
         user_id: candidateUser?.id,
         username: candidateUser?.username
       }));
+      let finalQuestionLimit = questionLimit;
+      if (questionLimit === 10) {
+        finalQuestionLimit = Math.floor(Math.random() * 3) + 8; // random between 8 and 10
+      } else if (questionLimit === 15) {
+        finalQuestionLimit = Math.floor(Math.random() * 3) + 13; // random between 13 and 15
+      }
+
       localStorage.setItem("hiremind_config", JSON.stringify({ 
         mode: selectedMode, 
         persona: selectedPersona,
+        question_limit: finalQuestionLimit,
         user_id: candidateUser?.id,
         username: candidateUser?.username
       }));
@@ -126,169 +183,306 @@ export default function SetupPage() {
   }
 
   return (
-    <div className="flex-1 flex flex-col items-center justify-center p-6 w-full max-w-6xl mx-auto min-h-screen">
-      
-      <motion.div 
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="text-center mb-12"
-      >
-        <h1 className="text-4xl md:text-5xl font-bold mb-4">Configure Your Interview</h1>
-        <p className="text-zinc-400 max-w-2xl mx-auto">
-          Upload your resume and select the interview parameters. HireMind AI will automatically extract your context and tailor the questions to your specific background.
-        </p>
-      </motion.div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full">
-        
-        {/* Step 1: Resume Upload */}
-        <motion.div 
-          initial={{ opacity: 0, x: -20 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ delay: 0.1 }}
-          className="glass-card p-8 flex flex-col h-full"
-        >
-          <div className="flex items-center gap-3 mb-6">
-            <div className="w-8 h-8 rounded-full bg-primary-500/20 flex items-center justify-center text-primary-400 font-bold">1</div>
-            <h2 className="text-2xl font-semibold">Upload Resume</h2>
-          </div>
-          
-          <div 
-            className={`flex-1 flex flex-col items-center justify-center border-2 border-dashed rounded-2xl p-8 transition-colors ${
-              isDragging ? "border-primary-500 bg-primary-500/10" : 
-              file ? "border-green-500/50 bg-green-500/5" : "border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/50"
-            }`}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            onClick={() => !file && fileInputRef.current?.click()}
-          >
-            <input 
-              type="file" 
-              ref={fileInputRef} 
-              onChange={handleFileChange} 
-              accept=".pdf" 
-              className="hidden" 
-            />
-            
-            {file ? (
-              <div className="flex flex-col items-center text-center">
-                <FileText className="w-16 h-16 text-green-400 mb-4" />
-                <h3 className="text-xl font-medium text-zinc-200">{file.name}</h3>
-                <p className="text-zinc-400 mt-2">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
-                <button 
-                  onClick={(e) => { e.stopPropagation(); setFile(null); }}
-                  className="mt-6 text-sm text-red-400 hover:text-red-300 transition-colors"
-                >
-                  Remove file
-                </button>
-              </div>
-            ) : (
-              <div className="flex flex-col items-center text-center cursor-pointer">
-                <Upload className={`w-16 h-16 mb-4 ${isDragging ? "text-primary-400" : "text-zinc-500"}`} />
-                <h3 className="text-xl font-medium text-zinc-300 mb-2">Drag & drop your PDF</h3>
-                <p className="text-zinc-500">or click to browse files</p>
-              </div>
-            )}
-          </div>
-        </motion.div>
-
-        {/* Step 2: Configuration */}
-        <motion.div 
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ delay: 0.2 }}
-          className="flex flex-col gap-6"
-        >
-          <div className="glass-card p-8">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="w-8 h-8 rounded-full bg-primary-500/20 flex items-center justify-center text-primary-400 font-bold">2</div>
-              <h2 className="text-2xl font-semibold">Interview Mode</h2>
-            </div>
-            
-            <div className="grid gap-3">
-              {modes.map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => setSelectedMode(m.id)}
-                  className={`flex items-start gap-4 p-4 rounded-xl border text-left transition-all ${
-                    selectedMode === m.id 
-                      ? "border-primary-500 bg-primary-500/10 shadow-[0_0_15px_rgba(139,92,246,0.1)]" 
-                      : "border-zinc-800 bg-zinc-900/50 hover:border-zinc-700 hover:bg-zinc-800"
-                  }`}
-                >
-                  <div className={`mt-0.5 ${selectedMode === m.id ? "text-primary-400" : "text-zinc-400"}`}>
-                    {m.icon}
-                  </div>
-                  <div>
-                    <h3 className="font-medium text-zinc-100">{m.id}</h3>
-                    <p className="text-sm text-zinc-400 mt-1">{m.desc}</p>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="glass-card p-8 flex-1">
-            <h3 className="text-lg font-medium text-zinc-300 mb-4 flex items-center gap-2">
-              <Settings className="w-5 h-5" /> Interviewer Persona
-            </h3>
-            <div className="flex flex-wrap gap-3">
-              {personas.map(p => (
-                <button
-                  key={p}
-                  onClick={() => setSelectedPersona(p)}
-                  className={`px-4 py-2 rounded-full border text-sm transition-colors ${
-                    selectedPersona === p 
-                      ? "border-primary-500 bg-primary-500/20 text-primary-300" 
-                      : "border-zinc-700 bg-zinc-800/50 text-zinc-400 hover:border-zinc-500"
-                  }`}
-                >
-                  {p}
-                </button>
-              ))}
-            </div>
-          </div>
-        </motion.div>
-
+    <div className="flex-1 flex flex-col min-h-screen bg-zinc-950 text-white overflow-hidden selection:bg-primary-500/30">
+      {/* Dynamic Background */}
+      <div className="fixed inset-0 z-0 opacity-40 pointer-events-none">
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary-600/30 blur-[120px] rounded-full mix-blend-screen" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-secondary-600/20 blur-[120px] rounded-full mix-blend-screen" />
       </div>
 
-      {/* Action Bar */}
-      <motion.div 
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.4 }}
-        className="mt-12 w-full flex justify-end"
-      >
-        <button
-          onClick={handleSubmit}
-          disabled={!file || isUploading || uploadSuccess}
-          className={`flex items-center gap-2 px-8 py-4 rounded-xl font-bold text-lg transition-all ${
-            uploadSuccess ? "bg-green-500 text-black" :
-            !file 
-              ? "bg-zinc-800 text-zinc-500 cursor-not-allowed" 
-              : "bg-primary-500 hover:bg-primary-400 text-white shadow-[0_0_20px_rgba(139,92,246,0.3)] hover:shadow-[0_0_30px_rgba(139,92,246,0.5)] transform hover:-translate-y-1"
-          }`}
+      {/* Top Header */}
+      <header className="w-full bg-zinc-950/60 backdrop-blur-xl border-b border-white/5 px-6 py-4 fixed top-0 z-50">
+        <div className="max-w-7xl mx-auto flex items-center w-full">
+          <Link href="/" className="flex items-center gap-3 group">
+            <div className="relative w-10 h-10 overflow-hidden rounded-xl bg-zinc-900 border border-white/10 group-hover:border-primary-500/50 transition-colors">
+              <Image 
+                src="/logo.png" 
+                alt="HireMind AI Logo" 
+                fill
+                className="object-cover"
+              />
+            </div>
+            <span className="font-extrabold tracking-tight text-lg">
+              HireMind <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary-400 to-secondary-400">AI</span>
+            </span>
+          </Link>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="flex-1 flex flex-col items-center justify-center p-6 w-full max-w-6xl mx-auto min-h-screen pt-32 relative z-10">
+        
+        <motion.div 
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="text-center mb-16"
         >
-          {uploadSuccess ? (
-            <>
-              <CheckCircle2 className="w-5 h-5" />
-              Processing Complete
-            </>
-          ) : isUploading ? (
-            <div className="flex items-center gap-3">
-              <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              Parsing Resume...
+          <h1 className="text-5xl md:text-6xl font-bold mb-6 tracking-tight text-purple-400">
+            Ready to start?
+          </h1>
+          <p className="text-lg md:text-xl text-zinc-400 max-w-2xl mx-auto leading-relaxed">
+            Upload your resume and select the interview parameters. HireMind AI will automatically extract your context and tailor the questions to your specific background.
+          </p>
+        </motion.div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full">
+          
+          {/* Step 1: Resume Upload */}
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ delay: 0.1 }}
+            className="h-fit w-full"
+          >
+        <div className="bg-zinc-900/50 backdrop-blur-xl border border-white/5 rounded-3xl p-8 relative overflow-hidden group shadow-2xl hover:border-primary-500/30 transition-all">
+          <div className="absolute top-0 right-0 w-64 h-64 bg-primary-500/10 rounded-full blur-3xl -mr-32 -mt-32 transition-transform duration-700 group-hover:scale-150" />
+          
+          <h2 className="text-2xl font-bold text-white flex items-center gap-3 mb-6">
+            <span className="flex items-center justify-center w-8 h-8 rounded-full bg-primary-500/20 text-primary-400 text-sm">1</span>
+            Provide Your Resume
+          </h2>
+          
+          {savedResume ? (
+            <div className="space-y-4">
+              <div 
+                onClick={() => setUseSavedResume(true)}
+                className={`p-4 rounded-xl border-2 cursor-pointer transition-all flex items-center gap-4 ${useSavedResume ? 'border-primary-500 bg-primary-500/10' : 'border-white/10 hover:border-white/20'}`}
+              >
+                <CheckCircle2 className={`w-6 h-6 ${useSavedResume ? 'text-primary-500' : 'text-zinc-600'}`} />
+                <div>
+                  <h4 className="font-semibold text-white">Use Saved Resume</h4>
+                  <p className="text-sm text-zinc-400">Last updated {new Date(savedResume.created_at).toLocaleDateString()}</p>
+                </div>
+              </div>
+
+              <div 
+                onClick={() => setUseSavedResume(false)}
+                className={`p-4 rounded-xl border-2 cursor-pointer transition-all flex items-center gap-4 ${!useSavedResume ? 'border-primary-500 bg-primary-500/10' : 'border-white/10 hover:border-white/20'}`}
+              >
+                <div className={`w-6 h-6 rounded-full border-2 flex items-center justify-center ${!useSavedResume ? 'border-primary-500' : 'border-zinc-600'}`}>
+                  {!useSavedResume && <div className="w-3 h-3 bg-primary-500 rounded-full" />}
+                </div>
+                <div>
+                  <h4 className="font-semibold text-white">Upload New Resume</h4>
+                  <p className="text-sm text-zinc-400">Upload a different PDF</p>
+                </div>
+              </div>
+
+              {!useSavedResume && (
+                <div 
+                  className={`mt-4 border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center text-center transition-all ${
+                    isDragging ? 'border-primary-500 bg-primary-500/10' : 'border-zinc-700 hover:border-zinc-500'
+                  }`}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                >
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    onChange={handleFileChange}
+                    accept=".pdf"
+                    className="hidden"
+                  />
+                  
+                  {file ? (
+                    <div className="flex flex-col items-center">
+                      <FileText className="w-12 h-12 text-primary-400 mb-3" />
+                      <p className="font-medium text-white mb-1">{file.name}</p>
+                      <p className="text-sm text-zinc-400">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
+                      <button 
+                        onClick={() => setFile(null)}
+                        className="mt-4 text-sm text-red-400 hover:text-red-300"
+                      >
+                        Remove file
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <Upload className="w-12 h-12 text-zinc-500 mb-4" />
+                      <h3 className="text-lg font-medium text-white mb-2">Upload your resume</h3>
+                      <p className="text-zinc-400 text-sm mb-6 max-w-sm">
+                        Drag and drop your PDF resume here, or click to browse files.
+                      </p>
+                      <button 
+                        onClick={() => fileInputRef.current?.click()}
+                        className="px-6 py-2 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg transition-colors"
+                      >
+                        Select File
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           ) : (
-            <>
-              Start Interview
-              <ChevronRight className="w-5 h-5" />
-            </>
+            <div 
+              className={`border-2 border-dashed rounded-2xl p-10 flex flex-col items-center justify-center text-center transition-all ${
+                isDragging ? 'border-primary-500 bg-primary-500/10' : 'border-zinc-700 hover:border-zinc-500'
+              }`}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+            >
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileChange}
+                accept=".pdf"
+                className="hidden"
+              />
+              
+              {file ? (
+                <div className="flex flex-col items-center">
+                  <FileText className="w-12 h-12 text-primary-400 mb-4" />
+                  <p className="font-medium text-white mb-2">{file.name}</p>
+                  <p className="text-sm text-zinc-400">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
+                  <button 
+                    onClick={() => setFile(null)}
+                    className="mt-4 text-sm text-red-400 hover:text-red-300 transition-colors"
+                  >
+                    Remove file
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <Upload className="w-12 h-12 text-zinc-500 mb-4" />
+                  <h3 className="text-lg font-medium text-white mb-2">Upload your resume</h3>
+                  <p className="text-zinc-400 text-sm mb-6 max-w-sm">
+                    Drag and drop your PDF resume here, or click to browse files.
+                  </p>
+                  <button 
+                    onClick={() => fileInputRef.current?.click()}
+                    className="px-6 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl transition-colors font-medium"
+                  >
+                    Select File
+                  </button>
+                </>
+              )}
+            </div>
           )}
-        </button>
-      </motion.div>
-      
+        </div>
+          </motion.div>
+
+          {/* Step 2: Configuration */}
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ delay: 0.2 }}
+            className="flex flex-col gap-6"
+          >
+            <div className="rounded-3xl bg-zinc-900/40 border border-white/5 p-8 shadow-2xl backdrop-blur-xl hover:border-secondary-500/30 transition-all">
+              <div className="flex items-center gap-4 mb-8">
+                <h2 className="text-3xl font-bold">Interview Mode</h2>
+              </div>
+              
+              <div className="grid gap-4">
+                {modes.map((m) => (
+                  <button
+                    key={m.id}
+                    onClick={() => setSelectedMode(m.id)}
+                    className={`flex items-start gap-5 p-5 rounded-2xl border text-left transition-all duration-300 ${
+                      selectedMode === m.id 
+                        ? "border-secondary-500 bg-secondary-500/10 shadow-[0_0_20px_rgba(217,70,239,0.15)] scale-[1.02]" 
+                        : "border-zinc-800 bg-zinc-950/50 hover:border-zinc-600 hover:bg-zinc-800"
+                    }`}
+                  >
+                    <div className={`mt-1 p-2 rounded-xl ${selectedMode === m.id ? "bg-secondary-500/20 text-secondary-400" : "bg-zinc-800 text-zinc-400"}`}>
+                      {m.icon}
+                    </div>
+                    <div>
+                      <h3 className={`text-lg font-bold ${selectedMode === m.id ? "text-white" : "text-zinc-300"}`}>{m.id}</h3>
+                      <p className="text-sm text-zinc-400 mt-1 leading-relaxed">{m.desc}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-3xl bg-zinc-900/40 border border-white/5 p-8 flex-1 shadow-2xl backdrop-blur-xl hover:border-emerald-500/30 transition-all">
+              <h3 className="text-xl font-bold text-white mb-6 flex items-center gap-3">
+                <div className="p-2 bg-emerald-500/10 rounded-xl text-emerald-400"><Settings className="w-5 h-5" /></div>
+                Interviewer Persona
+              </h3>
+              <div className="flex flex-wrap gap-4">
+                {personas.map(p => (
+                  <button
+                    key={p}
+                    onClick={() => setSelectedPersona(p)}
+                    disabled={(!useSavedResume && !file) || isUploading}
+                    className={`px-6 py-3 rounded-xl border text-base font-semibold transition-all duration-300 ${
+                      selectedPersona === p 
+                        ? "border-emerald-500 bg-emerald-500/20 text-emerald-300 shadow-[0_0_15px_rgba(16,185,129,0.2)]" 
+                        : "border-zinc-700 bg-zinc-950/50 text-zinc-400 hover:border-zinc-500 hover:bg-zinc-800"
+                    }`}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-3xl bg-zinc-900/40 border border-white/5 p-8 flex-1 shadow-2xl backdrop-blur-xl hover:border-blue-500/30 transition-all">
+              <h3 className="text-xl font-bold text-white mb-6 flex items-center gap-3">
+                <div className="p-2 bg-blue-500/10 rounded-xl text-blue-400"><Settings className="w-5 h-5" /></div>
+                Interview Length
+              </h3>
+              <div className="flex flex-col gap-3">
+                {lengths.map(l => (
+                  <button
+                    key={l.id}
+                    onClick={() => setQuestionLimit(l.id)}
+                    className={`flex items-center justify-center p-4 rounded-xl border transition-all duration-300 ${
+                      questionLimit === l.id 
+                        ? "border-blue-500 bg-blue-500/10 text-blue-300 shadow-[0_0_15px_rgba(59,130,246,0.15)]" 
+                        : "border-zinc-800 bg-zinc-950/50 hover:border-zinc-600 hover:bg-zinc-800"
+                    }`}
+                  >
+                    <span className="font-bold text-white">{l.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </motion.div>
+
+        </div>
+
+        {/* Action Bar */}
+        <motion.div 
+          initial={{ opacity: 0, y: 30 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.4 }}
+          className="mt-16 w-full flex justify-end mb-16"
+        >
+          <button
+            onClick={handleSubmit}
+            disabled={(!file && !useSavedResume) || isUploading || uploadSuccess}
+            className={`flex items-center justify-center gap-3 px-10 py-5 rounded-2xl font-black text-xl transition-all duration-300 w-full md:w-auto ${
+              uploadSuccess ? "bg-green-500 text-zinc-950 shadow-[0_0_40px_rgba(34,197,94,0.4)]" :
+              (!file && !useSavedResume)
+                ? "bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-700" 
+                : "bg-gradient-to-r from-primary-600 to-secondary-600 text-white shadow-[0_0_40px_rgba(139,92,246,0.3)] hover:shadow-[0_0_60px_rgba(139,92,246,0.5)] transform hover:scale-105 active:scale-95 cursor-pointer"
+            }`}
+          >
+            {uploadSuccess ? (
+              <>
+                <CheckCircle2 className="w-6 h-6" />
+                Processing Complete
+              </>
+            ) : isUploading ? (
+              <div className="flex items-center gap-3">
+                <div className="w-6 h-6 border-4 border-white/30 border-t-white rounded-full animate-spin" />
+                Parsing Resume...
+              </div>
+            ) : (
+              <>
+                Start Interview
+                <ChevronRight className="w-6 h-6" />
+              </>
+            )}
+          </button>
+        </motion.div>
+      </main>
     </div>
   );
 }

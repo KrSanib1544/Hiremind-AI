@@ -14,10 +14,12 @@ import {
   Eye, 
   Activity, 
   MessageSquare, 
-  AlertTriangle 
+  AlertTriangle,
+  CheckCircle2
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { API_BASE_URL } from "../config";
+import Link from "next/link";
 
 interface ChatMessage {
   role: "user" | "ai";
@@ -33,22 +35,41 @@ export default function InterviewPage() {
   const [isAiSpeaking, setIsAiSpeaking] = useState(false);
   
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const chatHistoryRef = useRef<ChatMessage[]>([]);
   const [transcript, setTranscript] = useState("");
 
   // Phase 4 State
-  const [isWebcamOn, setIsWebcamOn] = useState(false);
+  const [isWebcamVisible, setIsWebcamVisible] = useState(true);
   const [scriptsLoaded, setScriptsLoaded] = useState(false);
   const [scriptsError, setScriptsError] = useState(false);
   const [gazeStatus, setGazeStatus] = useState<"Focused" | "Looking Away">("Focused");
   const [stressStatus, setStressStatus] = useState<"Calm" | "Fidgety" | "Highly Fidgety">("Calm");
   
+  // Phase 5 Pre-check States
+  const [phase, setPhase] = useState<"instructions" | "precheck" | "interview">("instructions");
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isScreenShared, setIsScreenShared] = useState(false);
+  const [isMicCameraGranted, setIsMicCameraGranted] = useState(false);
+  const [violationWarning, setViolationWarning] = useState<{type: "fullscreen" | "screenshare", active: boolean}>({type: "fullscreen", active: false});
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  
   const [difficulty, setDifficulty] = useState<"Easy" | "Medium" | "Hard">("Medium");
   const [fillerCount, setFillerCount] = useState(0);
   const [lieAlerts, setLieAlerts] = useState<{ flagged: boolean; reason: string } | null>(null);
+  const [isMobileDevice, setIsMobileDevice] = useState(false);
+  
+  // Analytics Telemetry Trackers
+  const totalSecondsRef = useRef(0);
+  const lookAwaySecondsRef = useRef(0);
+  const fidgetySecondsRef = useRef(0);
+  const gazeStatusRef = useRef<"Focused" | "Looking Away">("Focused");
+  const stressStatusRef = useRef<"Calm" | "Fidgety" | "Highly Fidgety">("Calm");
   
   const recognitionRef = useRef<any>(null);
   const synthRef = useRef<SpeechSynthesis | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const isConcludingRef = useRef(false);
+  const isEndingRef = useRef(false);
 
   // Webcam & Tracking Refs
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -108,6 +129,11 @@ export default function InterviewPage() {
     }
     const loggedUser = JSON.parse(session);
 
+    // Clear previous roadmap progress since this is a new interview
+    localStorage.removeItem("hiremind_completed_tasks");
+    localStorage.removeItem("hiremind_roadmap_reward_claimed");
+    localStorage.removeItem("hiremind_evaluation_result");
+
     // Load context from local storage
     const savedConfig = localStorage.getItem("hiremind_config");
     const savedContext = localStorage.getItem("hiremind_context");
@@ -140,15 +166,18 @@ export default function InterviewPage() {
       recognition.interimResults = true;
       
       recognition.onresult = (event: any) => {
-        let currentTranscript = "";
-        for (let i = event.resultIndex; i < event.results.length; i++) {
+        let finalTrans = "";
+        let interimTrans = "";
+        for (let i = 0; i < event.results.length; i++) {
           if (event.results[i].isFinal) {
-            currentTranscript += event.results[i][0].transcript;
+            finalTrans += event.results[i][0].transcript + " ";
+          } else {
+            // Android Chrome bug fix: overwrite interimTrans instead of appending 
+            // so we only keep the very latest interim guess.
+            interimTrans = event.results[i][0].transcript;
           }
         }
-        if (currentTranscript.trim()) {
-          setTranscript((prev) => prev + " " + currentTranscript);
-        }
+        setTranscript((finalTrans + interimTrans).trim());
       };
       
       recognition.onerror = (event: any) => {
@@ -173,11 +202,23 @@ export default function InterviewPage() {
       if (recognitionRef.current) recognitionRef.current.stop();
       if (synthRef.current) synthRef.current.cancel();
     };
+  }, [phase]); // Re-run effect when phase changes, but we'll gate inside
+
+  // Detect Mobile Device to bypass unsupported APIs (Screen Share / Fullscreen)
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth < 768;
+      setIsMobileDevice(isMobile);
+      if (isMobile) {
+        setIsScreenShared(true); // Mobile browsers lack getDisplayMedia
+        setIsFullscreen(true);   // iOS Safari lacks document Fullscreen API
+      }
+    }
   }, []);
 
   // Real-Time Gaze & Stress Face Mesh Tracking
   useEffect(() => {
-    if (!isWebcamOn || !scriptsLoaded || typeof window === "undefined") return;
+    if (!scriptsLoaded || typeof window === "undefined") return;
 
     const FaceMeshClass = (window as any).FaceMesh;
     const CameraClass = (window as any).Camera;
@@ -242,8 +283,10 @@ export default function InterviewPage() {
 
           if (gazeOffset > 0.22) {
             setGazeStatus("Looking Away");
+            gazeStatusRef.current = "Looking Away";
           } else {
             setGazeStatus("Focused");
+            gazeStatusRef.current = "Focused";
           }
         }
 
@@ -265,10 +308,13 @@ export default function InterviewPage() {
               
               if (avgMovement > 2.5) {
                 setStressStatus("Highly Fidgety");
+                stressStatusRef.current = "Highly Fidgety";
               } else if (avgMovement > 0.9) {
                 setStressStatus("Fidgety");
+                stressStatusRef.current = "Fidgety";
               } else {
                 setStressStatus("Calm");
+                stressStatusRef.current = "Calm";
               }
             }
           }
@@ -297,7 +343,7 @@ export default function InterviewPage() {
 
     const camera = new CameraClass(videoElement, {
       onFrame: async () => {
-        if (videoElement && isWebcamOn) {
+        if (videoElement) {
           await faceMesh.send({ image: videoElement });
         }
       },
@@ -318,21 +364,33 @@ export default function InterviewPage() {
       setGazeStatus("Focused");
       setStressStatus("Calm");
     };
-  }, [isWebcamOn, scriptsLoaded]);
+  }, [scriptsLoaded, phase]);
+  
+  // Telemetry Timer for Deductions
+  useEffect(() => {
+    const timer = setInterval(() => {
+      totalSecondsRef.current += 1;
+      if (gazeStatusRef.current === "Looking Away") lookAwaySecondsRef.current += 1;
+      if (stressStatusRef.current === "Highly Fidgety") fidgetySecondsRef.current += 1;
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [phase]);
   
   // Auto-scroll on new messages
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatHistory, transcript]);
+  }, [chatHistory]);
 
   // Initial greeting
   useEffect(() => {
-    if (context && chatHistory.length === 0) {
+    if (phase === "interview" && context && chatHistory.length === 0) {
       const greeting = `Hello! I'm your ${context.persona} AI interviewer for today's ${context.interview_mode} interview. I've reviewed your resume. Are you ready to begin?`;
-      setChatHistory([{ role: "ai", content: greeting }]);
+      const initialChat = [{ role: "ai", content: greeting } as ChatMessage];
+      setChatHistory(initialChat);
+      chatHistoryRef.current = initialChat;
       speakText(greeting);
     }
-  }, [context]);
+  }, [context, phase]);
 
   const speakText = (text: string) => {
     if (!synthRef.current) return;
@@ -359,7 +417,20 @@ export default function InterviewPage() {
     }
     
     utterance.onstart = () => setIsAiSpeaking(true);
-    utterance.onend = () => setIsAiSpeaking(false);
+    utterance.onend = () => {
+      setIsAiSpeaking(false);
+      setTranscript("");
+      if (isConcludingRef.current) {
+        setTimeout(() => endInterview(), 3000);
+      } else {
+        try {
+          recognitionRef.current?.start();
+          setIsListening(true);
+        } catch (e) {
+          console.error(e);
+        }
+      }
+    };
     
     synthRef.current.speak(utterance);
   };
@@ -385,8 +456,19 @@ export default function InterviewPage() {
     const userText = transcript.trim();
     setTranscript("");
     
-    const newChatHistory = [...chatHistory, { role: "user", content: userText } as ChatMessage];
+    const newChatHistory = [...chatHistoryRef.current, { role: "user", content: userText } as ChatMessage];
     setChatHistory(newChatHistory);
+    chatHistoryRef.current = newChatHistory;
+    
+    const userMessageCount = newChatHistory.filter(msg => msg.role === "user").length;
+    // Exclude the initial greeting ("Are you ready?") from the question limit
+    const actualQuestionCount = Math.max(0, userMessageCount - 1);
+    const limit = context?.question_limit || 10;
+    const isFinal = actualQuestionCount >= limit;
+    
+    if (isFinal) {
+      isConcludingRef.current = true;
+    }
     
     setIsAiThinking(true);
     
@@ -395,7 +477,7 @@ export default function InterviewPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          context: context,
+          context: { ...context, is_final_turn: isFinal },
           chat_history: chatHistory.map(msg => ({ [msg.role]: msg.content })),
           latest_user_response: userText
         }),
@@ -405,7 +487,11 @@ export default function InterviewPage() {
       
       if (result.status === "success") {
         const aiText = result.data.ai_response;
-        setChatHistory(prev => [...prev, { role: "ai", content: aiText }]);
+        
+        const finalHistory = [...chatHistoryRef.current, { role: "ai", content: aiText } as ChatMessage];
+        setChatHistory(finalHistory);
+        chatHistoryRef.current = finalHistory;
+        
         speakText(aiText);
 
         // Update Phase 4 Live metrics
@@ -429,7 +515,9 @@ export default function InterviewPage() {
     } catch (error) {
       console.error("Error communicating with AI:", error);
       const errorMsg = "Sorry, I lost connection to my server. Let's try that again.";
-      setChatHistory(prev => [...prev, { role: "ai", content: errorMsg }]);
+      const errorHistory = [...chatHistoryRef.current, { role: "ai", content: errorMsg } as ChatMessage];
+      setChatHistory(errorHistory);
+      chatHistoryRef.current = errorHistory;
       speakText(errorMsg);
     } finally {
       setIsAiThinking(false);
@@ -437,31 +525,235 @@ export default function InterviewPage() {
   };
 
   const endInterview = () => {
+    isEndingRef.current = true;
     if (synthRef.current) synthRef.current.cancel();
     if (recognitionRef.current) recognitionRef.current.stop();
-    localStorage.setItem("hiremind_chat_history", JSON.stringify(chatHistory));
-    router.push("/results");
+    localStorage.setItem("hiremind_chat_history", JSON.stringify(chatHistoryRef.current));
+    
+    // Save Telemetry for Gamification Deductions
+    localStorage.setItem("hiremind_interview_metrics", JSON.stringify({
+      totalSeconds: totalSecondsRef.current,
+      lookAwaySeconds: lookAwaySecondsRef.current,
+      fidgetySeconds: fidgetySecondsRef.current,
+      fillerCount,
+      lieFlagged: lieAlerts ? lieAlerts.flagged : false
+    }));
+    
+    // Auto-exit fullscreen if active
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(err => console.error(err));
+    }
+    
+    // Stop screen share
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(track => track.stop());
+      setIsScreenShared(false);
+    }
+
+    // Force a hard navigation to avoid Next.js caching previous ?from=profile state
+    window.location.href = "/validation";
   };
+
+  const requestFullscreen = async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+      }
+      setIsFullscreen(true);
+    } catch (err) {
+      console.error("Fullscreen request failed", err);
+    }
+  };
+
+  const requestScreenShare = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      screenStreamRef.current = stream;
+      setIsScreenShared(true);
+      
+      stream.getVideoTracks()[0].onended = () => {
+        setIsScreenShared(false);
+        if (phase === "interview") {
+          setViolationWarning({ type: "screenshare", active: true });
+        }
+      };
+    } catch (err) {
+      console.error("Screen share request failed", err);
+    }
+  };
+
+  const requestMicCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      setIsMicCameraGranted(true);
+      stream.getTracks().forEach(track => track.stop());
+    } catch (err) {
+      console.error("Mic/Camera request failed", err);
+    }
+  };
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      if (!document.fullscreenElement) {
+        setIsFullscreen(false);
+        if (phase === "interview" && !isEndingRef.current) {
+          setViolationWarning({ type: "fullscreen", active: true });
+        }
+      } else {
+        setIsFullscreen(true);
+      }
+    };
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, [phase]);
+
+  const resolveViolation = async () => {
+    if (violationWarning.type === "fullscreen") {
+      await requestFullscreen();
+      if (document.fullscreenElement) {
+        setViolationWarning({ ...violationWarning, active: false });
+      }
+    } else if (violationWarning.type === "screenshare") {
+      await requestScreenShare();
+      if (screenStreamRef.current && screenStreamRef.current.active) {
+        setViolationWarning({ ...violationWarning, active: false });
+      }
+    }
+  };
+
+  if (phase === "instructions") {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen w-full bg-background p-6">
+        <div className="max-w-2xl w-full glass-card p-10 rounded-[2rem] border border-white/10 relative overflow-hidden shadow-2xl">
+          <div className="absolute top-[-20%] right-[-10%] w-[400px] h-[400px] bg-primary-500/10 blur-[100px] rounded-full pointer-events-none" />
+          <h2 className="text-2xl font-black text-white mb-8 uppercase tracking-[0.15em] flex items-center gap-3">
+            <AlertTriangle className="text-amber-400 w-7 h-7" /> Interview Rules
+          </h2>
+          <div className="space-y-6 text-zinc-300 text-sm font-medium leading-relaxed">
+            <div className="flex items-start gap-4">
+              <div className="w-8 h-8 rounded-full bg-primary-500/10 text-primary-400 flex items-center justify-center shrink-0 border border-primary-500/20 font-bold">1</div>
+              <p className="mt-1">The interview is strictly conducted in <span className="text-white font-bold">Fullscreen mode</span>. Exiting fullscreen will flag a security violation and instantly pause the interview.</p>
+            </div>
+            <div className="flex items-start gap-4">
+              <div className="w-8 h-8 rounded-full bg-primary-500/10 text-primary-400 flex items-center justify-center shrink-0 border border-primary-500/20 font-bold">2</div>
+              <p className="mt-1">You must share your <span className="text-white font-bold">Entire Screen</span>. We actively monitor the feed to ensure no cheating tools are used. Stopping the stream will pause the interview.</p>
+            </div>
+            <div className="flex items-start gap-4">
+              <div className="w-8 h-8 rounded-full bg-primary-500/10 text-primary-400 flex items-center justify-center shrink-0 border border-primary-500/20 font-bold">3</div>
+              <p className="mt-1">AI <span className="text-white font-bold">Eye-tracking and Posture</span> algorithms are active. Looking away or fidgeting excessively will result in heavy XP deductions.</p>
+            </div>
+          </div>
+          <button 
+            onClick={() => setPhase("precheck")}
+            className="mt-10 w-full py-4 rounded-xl bg-gradient-to-r from-primary-600 to-secondary-600 text-white font-black uppercase tracking-[0.2em] shadow-[0_0_30px_rgba(139,92,246,0.3)] hover:opacity-90 hover:scale-[1.02] transition-all cursor-pointer"
+          >
+            I Understand the Rules
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (phase === "precheck") {
+    const allPassed = isFullscreen && isScreenShared && isMicCameraGranted;
+    return (
+      <div className="flex flex-col items-center justify-center h-screen w-full bg-background p-6">
+        <div className="max-w-md w-full glass-card p-8 rounded-3xl border border-white/10 relative overflow-hidden flex flex-col gap-5 shadow-2xl">
+          <div className="absolute top-[-20%] left-[-10%] w-[300px] h-[300px] bg-secondary-500/10 blur-[100px] rounded-full pointer-events-none" />
+          <h2 className="text-xl font-black text-white text-center mb-4 uppercase tracking-[0.1em]">System Pre-Checks</h2>
+          
+          <div className={`flex items-center justify-between p-4 rounded-xl transition-colors ${isScreenShared ? "bg-emerald-500/10 border border-emerald-500/20" : "bg-zinc-950/50 border border-white/5"}`}>
+            <div className="flex flex-col">
+              <span className="text-sm font-bold text-white">1. Screen Share</span>
+              <span className="text-[10px] text-zinc-500 uppercase tracking-widest mt-0.5">
+                {isMobileDevice ? "Auto-bypassed on Mobile" : "Select \"Entire Screen\""}
+              </span>
+            </div>
+            {isScreenShared ? (
+              <CheckCircle2 className="text-emerald-400 w-5 h-5" />
+            ) : (
+              <button onClick={requestScreenShare} className="px-4 py-2 rounded-lg bg-white text-black text-xs font-bold hover:bg-zinc-200 cursor-pointer transition-colors">Share</button>
+            )}
+          </div>
+
+          <div className={`flex items-center justify-between p-4 rounded-xl transition-all ${isFullscreen ? "bg-emerald-500/10 border border-emerald-500/20" : isScreenShared ? "bg-zinc-950/50 border border-white/5" : "opacity-30 pointer-events-none bg-zinc-950/50 border border-white/5"}`}>
+            <div className="flex flex-col">
+              <span className="text-sm font-bold text-white">2. Fullscreen Access</span>
+              <span className="text-[10px] text-zinc-500 uppercase tracking-widest mt-0.5">
+                {isMobileDevice ? "Auto-bypassed on Mobile" : "Focus environment"}
+              </span>
+            </div>
+            {isFullscreen ? (
+              <CheckCircle2 className="text-emerald-400 w-5 h-5" />
+            ) : (
+              <button onClick={requestFullscreen} className="px-4 py-2 rounded-lg bg-white text-black text-xs font-bold hover:bg-zinc-200 cursor-pointer transition-colors">Grant</button>
+            )}
+          </div>
+          
+          <div className={`flex items-center justify-between p-4 rounded-xl transition-all ${isMicCameraGranted ? "bg-emerald-500/10 border border-emerald-500/20" : isFullscreen ? "bg-zinc-950/50 border border-white/5" : "opacity-30 pointer-events-none bg-zinc-950/50 border border-white/5"}`}>
+            <div className="flex flex-col">
+              <span className="text-sm font-bold text-white">3. Mic & Camera</span>
+              <span className="text-[10px] text-zinc-500 uppercase tracking-widest mt-0.5">AI Interaction</span>
+            </div>
+            {isMicCameraGranted ? (
+              <CheckCircle2 className="text-emerald-400 w-5 h-5" />
+            ) : (
+              <button onClick={requestMicCamera} className="px-4 py-2 rounded-lg bg-white text-black text-xs font-bold hover:bg-zinc-200 cursor-pointer transition-colors">Allow</button>
+            )}
+          </div>
+
+          <button 
+            onClick={() => setPhase("interview")}
+            disabled={!allPassed}
+            className={`mt-6 w-full py-4 rounded-xl font-black uppercase tracking-[0.2em] transition-all ${allPassed ? "bg-gradient-to-r from-emerald-500 to-emerald-400 text-black shadow-[0_0_20px_rgba(16,185,129,0.3)] hover:opacity-90 cursor-pointer transform hover:scale-[1.02]" : "bg-zinc-900 border border-zinc-800 text-zinc-600 cursor-not-allowed"}`}
+          >
+            Start Interview
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-screen w-full bg-background overflow-hidden relative">
       
-      {/* Dynamic Background */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className={`absolute top-[20%] left-[50%] -translate-x-1/2 w-[600px] h-[600px] rounded-full blur-[120px] transition-all duration-1000 ${
-          isAiSpeaking ? "bg-primary-600/30 scale-110" :
-          isAiThinking ? "bg-blue-600/20 animate-pulse" :
-          isListening ? "bg-green-600/20 scale-105" :
-          "bg-primary-900/10"
-        }`} />
-      </div>
+      {/* Violation Modal */}
+      <AnimatePresence>
+        {violationWarning.active && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/90 backdrop-blur-xl">
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="max-w-md w-full bg-zinc-950 border border-red-500/30 p-8 rounded-3xl text-center shadow-[0_0_80px_rgba(239,68,68,0.2)]"
+            >
+              <div className="w-20 h-20 mx-auto bg-red-500/10 border border-red-500/20 rounded-full flex items-center justify-center mb-6">
+                <AlertTriangle className="text-red-500 w-10 h-10 animate-pulse" />
+              </div>
+              <h2 className="text-2xl font-black text-white mb-3">Security Violation</h2>
+              <p className="text-zinc-400 text-sm mb-8 leading-relaxed font-medium">
+                {violationWarning.type === "fullscreen" 
+                  ? "You exited fullscreen mode. This is a strict violation of the interview rules. The interview is paused until you return to fullscreen."
+                  : "You stopped sharing your screen. This is a strict violation of the interview rules. The interview is paused until you re-share your entire screen."
+                }
+              </p>
+              <button 
+                onClick={resolveViolation}
+                className="w-full py-3.5 rounded-xl bg-red-500 text-white font-black uppercase tracking-widest hover:bg-red-600 transition-colors shadow-[0_0_20px_rgba(239,68,68,0.4)]"
+              >
+                {violationWarning.type === "fullscreen" ? "Return to Fullscreen" : "Re-share Screen"}
+              </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Header */}
       <header className="w-full p-6 flex justify-between items-center z-10 glass-panel border-b border-white/5">
         <div>
-          <h1 className="text-xl font-bold text-white flex items-center gap-2">
-            <BrainCircuit className="text-primary-400" /> HireMind <span className="font-light text-zinc-400">AI</span>
-          </h1>
+          <span className="text-xl font-bold text-white flex items-center gap-2">
+            HireMind
+          </span>
           <p className="text-xs text-zinc-400 mt-1">
             {context?.interview_mode} • {context?.persona} Persona
           </p>
@@ -470,24 +762,18 @@ export default function InterviewPage() {
         <div className="flex items-center gap-4">
           {/* Webcam Control Button */}
           <button
-            onClick={() => setIsWebcamOn(prev => !prev)}
+            onClick={() => setIsWebcamVisible(prev => !prev)}
             disabled={scriptsError}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all text-xs font-semibold ${
-              isWebcamOn 
+            className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all text-xs font-semibold ${
+              isWebcamVisible 
                 ? "bg-teal-500/10 text-teal-400 border-teal-500/20 shadow-[0_0_15px_rgba(20,184,166,0.1)] hover:bg-teal-500/20" 
                 : "bg-zinc-800 text-zinc-400 border-zinc-700 hover:bg-zinc-700"
             }`}
           >
-            {isWebcamOn ? <VideoOff className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
-            {isWebcamOn ? "Webcam HUD On" : "Webcam HUD Off"}
+            {isWebcamVisible ? <VideoOff className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
+            {isWebcamVisible ? "Minimize Webcam" : "Expand Webcam"}
           </button>
 
-          <div className="flex items-center gap-2 text-sm">
-            <div className={`w-2 h-2 rounded-full ${isAiThinking ? "bg-blue-500 animate-pulse" : isAiSpeaking ? "bg-primary-500 animate-pulse" : "bg-zinc-600"}`} />
-            <span className="text-zinc-400 text-xs hidden sm:inline">
-              {isAiThinking ? "AI is thinking..." : isAiSpeaking ? "AI is speaking" : "AI is ready"}
-            </span>
-          </div>
           <button 
             onClick={endInterview}
             className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors text-sm font-medium border border-red-500/20"
@@ -498,48 +784,65 @@ export default function InterviewPage() {
       </header>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col md:flex-row p-6 gap-6 z-10 h-full overflow-hidden max-w-7xl mx-auto w-full">
+      <div className="flex-1 flex flex-col-reverse md:flex-row p-4 md:p-6 gap-4 md:gap-6 z-10 h-full overflow-hidden max-w-7xl mx-auto w-full">
         
         {/* Left: AI Visualizer, WebCam HUD, and Analytics Telemetry */}
-        <div className="flex-1 flex flex-col items-center justify-between glass-card rounded-2xl relative p-6 overflow-y-auto scrollbar-thin">
+        <div className="w-full md:flex-1 flex flex-col items-center justify-between glass-card rounded-2xl relative p-4 sm:p-6 overflow-y-auto scrollbar-thin shrink-0 md:shrink">
           
           <div className="w-full flex-1 flex flex-col items-center justify-center">
             
             {/* Dynamic Two-Column Layout for Orb vs Webcam */}
-            <div className={`w-full flex flex-col lg:flex-row items-center justify-center gap-8 transition-all duration-500 ${isWebcamOn ? "lg:items-stretch" : ""}`}>
+            <div className={`w-full flex flex-col lg:flex-row items-center justify-center gap-8 transition-all duration-500 ${isWebcamVisible ? "lg:items-stretch" : ""}`}>
               
               {/* Central AI Orb */}
-              <div className={`flex flex-col items-center justify-center transition-all duration-500 ${isWebcamOn ? "lg:w-1/2" : "w-full"}`}>
-                <div className={`relative flex items-center justify-center mb-6 transition-all ${isWebcamOn ? "w-48 h-48" : "w-60 h-60"}`}>
-                  <motion.div 
-                    animate={{ 
-                      scale: isAiSpeaking ? [1, 1.2, 1] : isListening ? [1, 1.1, 1] : 1,
-                      opacity: isAiSpeaking ? [0.3, 0.6, 0.3] : 0.2
-                    }}
-                    transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
+              <div className={`flex flex-col items-center justify-center transition-all duration-500 ${isWebcamVisible ? "lg:w-1/2" : "w-full"}`}>
+                
+                {/* Desktop-only Radial Orb */}
+                <div className={`hidden sm:flex relative items-center justify-center mb-6 transition-all ${isWebcamVisible ? "w-48 h-48" : "w-60 h-60"}`}>
+                  <div 
                     className={`absolute inset-0 rounded-full border-2 ${
-                      isListening ? "border-green-500" : "border-primary-500"
-                    }`}
+                      isListening ? "border-green-500 opacity-20" : "border-primary-500 opacity-20"
+                    } ${isAiSpeaking || isListening ? 'animate-ping' : ''}`}
+                    style={{ animationDuration: '3s' }}
                   />
-                  <motion.div 
-                    animate={{ 
-                      scale: isAiSpeaking ? [1, 1.4, 1] : isListening ? [1, 1.2, 1] : 1,
-                      opacity: isAiSpeaking ? [0.1, 0.3, 0.1] : 0.1
-                    }}
-                    transition={{ repeat: Infinity, duration: 2.5, ease: "easeInOut", delay: 0.2 }}
+                  <div 
                     className={`absolute inset-[-15px] rounded-full border border-dashed ${
-                      isListening ? "border-green-500" : "border-primary-500"
-                    }`}
+                      isListening ? "border-green-500 opacity-10" : "border-primary-500 opacity-10"
+                    } ${isAiSpeaking || isListening ? 'animate-pulse' : ''}`}
+                    style={{ animationDuration: '2s' }}
                   />
-                  <div className={`rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(0,0,0,0.5)] transition-all duration-500 ${
-                    isWebcamOn ? "w-28 h-28" : "w-32 h-32"
+                  <div className={`rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(0,0,0,0.5)] transition-all duration-500 overflow-hidden ${
+                    isWebcamVisible ? "w-28 h-28" : "w-32 h-32"
                   } ${
                     isListening ? "bg-gradient-to-br from-green-400 to-green-600 shadow-green-500/50" : 
                     isAiThinking ? "bg-gradient-to-br from-blue-400 to-blue-600 shadow-blue-500/50" :
                     "bg-gradient-to-br from-primary-400 to-primary-600 shadow-primary-500/50"
                   }`}>
-                    <BrainCircuit className="w-10 h-10 text-white/80" />
+                    <img src="/logo.png" alt="HireMind" className="w-14 h-14 object-contain drop-shadow-[0_0_15px_rgba(255,255,255,0.5)]" />
                   </div>
+                </div>
+
+                {/* Mobile-only dots animation when speaking/listening */}
+                <div className="flex sm:hidden items-center justify-center gap-3 h-8 mb-4 w-full">
+                  {isListening && [1, 2, 3].map((i) => (
+                    <motion.div
+                      key={`listen-${i}`}
+                      className="w-3 h-3 rounded-full bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]"
+                      animate={{ scale: [1, 1.4, 1], opacity: [0.4, 1, 0.4] }}
+                      transition={{ duration: 1, repeat: Infinity, delay: i * 0.2 }}
+                    />
+                  ))}
+                  {isAiSpeaking && [1, 2, 3].map((i) => (
+                    <motion.div
+                      key={`speak-${i}`}
+                      className="w-3 h-3 rounded-full bg-primary-500 shadow-[0_0_10px_rgba(139,92,246,0.6)]"
+                      animate={{ scale: [1, 1.4, 1], opacity: [0.4, 1, 0.4] }}
+                      transition={{ duration: 1, repeat: Infinity, delay: i * 0.2 }}
+                    />
+                  ))}
+                  {!isListening && !isAiSpeaking && (
+                    <div className="text-xs text-zinc-500 font-medium tracking-widest uppercase">Standing By</div>
+                  )}
                 </div>
 
                 {/* Primary Action Button */}
@@ -578,9 +881,8 @@ export default function InterviewPage() {
               </div>
 
               {/* Webcam Tracking HUD */}
-              {isWebcamOn && (
-                <div className="lg:w-1/2 flex flex-col justify-center items-center">
-                  <div className="relative w-full max-w-sm aspect-[4/3] rounded-xl overflow-hidden border border-white/10 bg-black/40 shadow-inner">
+              <div className={`hidden sm:flex ${isWebcamVisible ? "lg:w-1/2 relative" : "absolute opacity-0 pointer-events-none w-0 h-0 overflow-hidden"} flex-col justify-center items-center`}>
+                <div className="relative w-full max-w-sm aspect-[4/3] rounded-xl overflow-hidden border border-white/10 bg-black/40 shadow-inner">
                     <video
                       ref={videoRef}
                       className="w-full h-full object-cover scale-x-[-1]" 
@@ -615,14 +917,13 @@ export default function InterviewPage() {
                     </div>
                   </div>
                 </div>
-              )}
 
             </div>
 
           </div>
 
           {/* Telemetry HUD Panel */}
-          <div className="w-full mt-6 pt-6 border-t border-white/5">
+          <div className="hidden sm:block w-full mt-6 pt-6 border-t border-white/5">
             <h3 className="text-xs font-bold text-zinc-400 uppercase tracking-widest mb-3 flex items-center gap-1.5">
               <Zap className="w-3.5 h-3.5 text-primary-400" /> Interviewer Analytics console
             </h3>
@@ -693,9 +994,9 @@ export default function InterviewPage() {
         </div>
 
         {/* Right: Live Transcript */}
-        <div className="w-full md:w-[360px] lg:w-[420px] flex flex-col glass-card rounded-2xl overflow-hidden">
+        <div className="w-full md:w-[360px] lg:w-[420px] flex-1 md:flex-none flex flex-col glass-card rounded-2xl overflow-hidden">
           <div className="p-4 border-b border-white/10 bg-white/5 font-medium flex items-center gap-2">
-            <FileTextIcon /> Live Transcript
+            <FileTextIcon /> Live Feed
           </div>
           
           <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
@@ -706,10 +1007,10 @@ export default function InterviewPage() {
                 animate={{ opacity: 1, x: 0 }}
                 className={`flex gap-3 max-w-[85%] ${msg.role === "user" ? "ml-auto flex-row-reverse" : "mr-auto"}`}
               >
-                <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 overflow-hidden ${
                   msg.role === "user" ? "bg-zinc-800 text-zinc-400" : "bg-primary-500/20 text-primary-400"
                 }`}>
-                  {msg.role === "user" ? <User className="w-4 h-4" /> : <BrainCircuit className="w-4 h-4" />}
+                  {msg.role === "user" ? <User className="w-4 h-4" /> : <img src="/logo.png" alt="AI" className="w-5 h-5 object-contain" />}
                 </div>
                 <div className={`p-3 rounded-2xl text-sm leading-relaxed ${
                   msg.role === "user" 
@@ -742,7 +1043,7 @@ export default function InterviewPage() {
           </div>
           
           <div className="p-4 border-t border-white/5 bg-white/5">
-             <p className="text-xs text-center text-zinc-500">
+             <p className="text-xs text-center text-amber-500 font-bold tracking-wide">
                Speak clearly into your microphone. The AI will respond automatically.
              </p>
           </div>
